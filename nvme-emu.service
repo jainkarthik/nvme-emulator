@@ -1,0 +1,13 @@
+[Unit]
+Description=Host NVMe emulation (loop-backed nvmet)
+After=local-fs.target systemd-modules-load.service
+Requires=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/setup_nvme_emu.sh
+ExecStop=/usr/local/sbin/teardown_nvme_emu.sh
+
+[Install]
+WantedBy=multi-user.target

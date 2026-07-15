@@ -1,0 +1,19 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  shell-syntax-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate shell scripts
+        run: |
+          set -euo pipefail
+          bash -n setup_nvme_emu.sh
+          bash -n teardown_nvme_emu.sh
+          bash -n install_persistence.sh
