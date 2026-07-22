@@ -1,67 +1,97 @@
 # Host NVMe Emulation (Ubuntu 22.04/24.04)
 
-This setup creates **6 emulated NVMe drives, 20GB each**, on the host and keeps them persistent across reboot.
+This repository creates persistent, raw NVMe block devices on the host using backing files, loop devices, `nvmet`, and the NVMe loop transport.
 
-It intentionally creates **raw block devices only**:
-- no partitioning
-- no filesystem creation
-- no mounting
-- no ZFS pool creation
+By default it creates **6 drives of 20 GiB each** at `/var/lib/nvme-emu/nvme-drive{1..6}.img`.
 
-You can format/use the drives yourself afterward.
-
-## What this uses
-
-1. Backing image files (`/var/lib/nvme-emu/nvme-drive{1..6}.img`)
-2. Loop devices (`/dev/loop*`)
-3. Linux NVMe target (`nvmet`) namespaces
-4. Local NVMe loop transport connection (`nvme connect -t loop`)
-
-Result: host-visible `/dev/nvme*` devices backed by persistent files.
-
-## Files in this directory
-
-- `setup_nvme_emu.sh`: creates/reconciles emulated NVMe devices
-- `teardown_nvme_emu.sh`: disconnects/tears down emulation (keeps images by default)
-- `nvme-emu.service`: systemd unit for persistence across reboot
-- `install_persistence.sh`: installs scripts/service + enables autostart
-- `CONTRIBUTING.md`: contribution guidelines
-- `CODE_OF_CONDUCT.md`: community behavior expectations
-- `SECURITY.md`: vulnerability reporting policy
-- `CHANGELOG.md`: project change history
-- `LICENSE`: MIT License
+It does **not** partition, format, or mount anything.
 
 ## Prerequisites
 
-Install required packages:
+Install the required packages:
 
 ```bash
 sudo apt update
 sudo apt install -y nvme-cli util-linux kmod
 ```
 
-Ensure configfs is available:
+Make sure `configfs` can be mounted:
 
 ```bash
 sudo modprobe configfs
 ```
 
-## One-time setup (persistent across reboot)
+## Quick start
 
-From this folder:
+From the repository root:
 
 ```bash
 chmod +x setup_nvme_emu.sh teardown_nvme_emu.sh install_persistence.sh
 sudo ./install_persistence.sh
 ```
 
-This does:
-1. Installs scripts to `/usr/local/sbin/`
-2. Installs systemd unit to `/etc/systemd/system/nvme-emu.service`
-3. Creates `/etc/modules-load.d/nvme-emu.conf`
-4. Enables and starts `nvme-emu.service`
+That will:
+1. Install the scripts to `/usr/local/sbin/`
+2. Install `nvme-emu.service` to `/etc/systemd/system/`
+3. Create `/etc/modules-load.d/nvme-emu.conf`
+4. Enable and start the service
 
-## Verify emulated drives
+To remove the persistent install later:
+
+```bash
+sudo ./install_persistence.sh uninstall
+```
+
+To tear down the NVMe devices but keep the backing images:
+
+```bash
+sudo /usr/local/sbin/teardown_nvme_emu.sh
+```
+
+To tear down everything, including the image files:
+
+```bash
+sudo DESTROY_IMAGES=1 /usr/local/sbin/teardown_nvme_emu.sh
+```
+
+Run `setup_nvme_emu.sh` when you want to create or reconcile the emulated NVMe devices:
+- the first time you set the system up
+- after a reboot if the service is not enabled
+- after changing `NUM_DRIVES`, `DRIVE_SIZE_GB`, `BASE_DIR`, `NQN`, or `PORT_ID`
+- after teardown, if you want the drives back immediately
+
+## What gets created
+
+1. Backing image files in `BASE_DIR`
+2. Loop devices for those files
+3. `nvmet` namespaces
+4. A local NVMe loop connection that appears as `/dev/nvme*`
+
+## Configuration
+
+Use environment variables when running `setup_nvme_emu.sh` or `teardown_nvme_emu.sh`:
+
+| Variable | Default | Meaning |
+|---|---:|---|
+| `NUM_DRIVES` | `6` | Number of namespaces/drives |
+| `DRIVE_SIZE_GB` | `20` | Size of each backing image |
+| `BASE_DIR` | `/var/lib/nvme-emu` | Directory for backing images |
+| `IMAGE_PREFIX` | `nvme-drive` | Backing image filename prefix |
+| `NQN` | `nqn.2026-07.local.host:nvme-emu` | NVMe subsystem NQN |
+| `PORT_ID` | `1` | NVMe target port ID |
+| `DESTROY_IMAGES` | `0` | Set to `1` during teardown to delete images |
+
+`NUM_DRIVES`, `DRIVE_SIZE_GB`, and `PORT_ID` must be positive integers. `NQN` must not contain `/`.
+
+Example:
+
+```bash
+sudo env NUM_DRIVES=6 DRIVE_SIZE_GB=20 BASE_DIR=/var/lib/nvme-emu \
+  NQN=nqn.2026-07.local.host:nvme-emu PORT_ID=1 \
+  ./setup_nvme_emu.sh
+```
+
+## Verify
 
 ```bash
 nvme list
@@ -69,26 +99,24 @@ nvme list-subsys
 ls -l /var/lib/nvme-emu
 ```
 
-You should see six 20GB namespaces as NVMe block devices.
+You should see six NVMe namespaces backed by the image files.
 
-## Reboot persistence check
+## Reboot persistence
+
+After setup, rebooting should restore the same drives automatically:
 
 ```bash
 sudo reboot
 ```
 
-After reboot:
+Then verify:
 
 ```bash
 systemctl status nvme-emu.service --no-pager
 nvme list
 ```
 
-The service should be active and drives should be present again.
-
-## Run core NVMe commands on all 6 drives
-
-Example loop:
+## Common NVMe commands
 
 ```bash
 for d in /dev/nvme*n1; do
@@ -99,50 +127,22 @@ for d in /dev/nvme*n1; do
 done
 ```
 
-Notes:
-- `id-ctrl` and `smart-log` use controller path (e.g., `/dev/nvme0`).
-- `id-ns` uses namespace path (e.g., `/dev/nvme0n1`).
-
-## Tuning configuration
-
-Set environment variables before running setup:
-
-```bash
-sudo env NUM_DRIVES=6 DRIVE_SIZE_GB=20 BASE_DIR=/var/lib/nvme-emu \
-  NQN=nqn.2026-07.local.host:nvme-emu PORT_ID=1 \
-  /usr/local/sbin/setup_nvme_emu.sh
-```
-
-Defaults already match your requested layout.
-
-## Teardown
-
-Keep backing images:
-
-```bash
-sudo /usr/local/sbin/teardown_nvme_emu.sh
-```
-
-Destroy backing images too:
-
-```bash
-sudo DESTROY_IMAGES=1 /usr/local/sbin/teardown_nvme_emu.sh
-```
+`id-ctrl` and `smart-log` use the controller path (`/dev/nvme0`), while `id-ns` uses the namespace path (`/dev/nvme0n1`).
 
 ## Troubleshooting
 
-If service fails:
+If the service fails:
 
 ```bash
 journalctl -u nvme-emu.service --no-pager -n 200
 ```
 
 If no `/dev/nvme*` devices appear:
-1. Check modules:
+1. Check loaded modules:
    ```bash
    lsmod | egrep 'nvmet|nvme_loop|loop'
    ```
-2. Check subsystem connection:
+2. Check the subsystem connection:
    ```bash
    nvme list-subsys
    ```
@@ -151,20 +151,32 @@ If no `/dev/nvme*` devices appear:
    sudo /usr/local/sbin/setup_nvme_emu.sh
    ```
 
+## Files in this repository
+
+- `setup_nvme_emu.sh`: creates or reconciles the emulated NVMe devices
+- `teardown_nvme_emu.sh`: disconnects and tears down the emulation
+- `nvme-emu.service`: systemd unit for boot-time persistence
+- `install_persistence.sh`: installs or uninstalls the persistent setup
+- `CONTRIBUTING.md`: contribution guidelines
+- `CODE_OF_CONDUCT.md`: community behavior expectations
+- `SECURITY.md`: vulnerability reporting policy
+- `CHANGELOG.md`: project history
+- `LICENSE`: MIT License
+
 ## Limitations
 
 - This is software emulation; some hardware/vendor-specific NVMe commands are unsupported.
-- Core admin + I/O workflows are the target.
-- Device names (`/dev/nvmeXnY`) can vary by probe order; use `nvme list` each boot to confirm mapping.
+- Core admin and I/O workflows are the target.
+- Device names (`/dev/nvmeXnY`) can vary by probe order; use `nvme list` after boot to confirm mapping.
 
 ## Contributing
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md) for contribution and validation guidelines.
+See [CONTRIBUTING.md](./CONTRIBUTING.md).
 
 ## Security
 
-See [SECURITY.md](./SECURITY.md) for responsible vulnerability disclosure.
+See [SECURITY.md](./SECURITY.md).
 
 ## License
 
-This project is licensed under the MIT License. See [LICENSE](./LICENSE).
+See [LICENSE](./LICENSE).

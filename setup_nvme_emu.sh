@@ -28,6 +28,31 @@ need_cmd() {
   fi
 }
 
+validate_positive_int() {
+  local name="$1"
+  local value="$2"
+  if [[ ! "${value}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: ${name} must be a positive integer" >&2
+    exit 1
+  fi
+}
+
+validate_inputs() {
+  validate_positive_int NUM_DRIVES "${NUM_DRIVES}"
+  validate_positive_int DRIVE_SIZE_GB "${DRIVE_SIZE_GB}"
+  validate_positive_int PORT_ID "${PORT_ID}"
+
+  if [[ -z "${BASE_DIR}" ]]; then
+    echo "ERROR: BASE_DIR must not be empty" >&2
+    exit 1
+  fi
+
+  if [[ -z "${NQN}" || "${NQN}" == *"/"* ]]; then
+    echo "ERROR: NQN must be non-empty and must not contain '/'" >&2
+    exit 1
+  fi
+}
+
 ensure_configfs_mounted() {
   if ! mountpoint -q /sys/kernel/config; then
     mount -t configfs none /sys/kernel/config
@@ -62,10 +87,28 @@ ensure_loop_for_image() {
   losetup --find --show "${img}"
 }
 
+prune_stale_namespaces() {
+  local subsys_path="$1"
+  local ns ns_name
+  shopt -s nullglob
+  for ns in "${subsys_path}"/namespaces/*; do
+    [[ -d "${ns}" ]] || continue
+    ns_name="${ns##*/}"
+    if [[ "${ns_name}" =~ ^[0-9]+$ ]] && (( ns_name > NUM_DRIVES )); then
+      if [[ -f "${ns}/enable" ]]; then
+        echo 0 > "${ns}/enable" || true
+      fi
+      rmdir "${ns}" 2>/dev/null || true
+    fi
+  done
+  shopt -u nullglob
+}
+
 configure_nvmet_subsystem() {
   local subsys_path="/sys/kernel/config/nvmet/subsystems/${NQN}"
   mkdir -p "${subsys_path}"
   echo 1 > "${subsys_path}/attr_allow_any_host"
+  prune_stale_namespaces "${subsys_path}"
 
   local i img loop_dev ns_path current_path current_enable
   for ((i=1; i<=NUM_DRIVES; i++)); do
@@ -96,9 +139,18 @@ configure_nvmet_subsystem() {
 configure_nvmet_port() {
   local port_path="/sys/kernel/config/nvmet/ports/${PORT_ID}"
   mkdir -p "${port_path}"
+  mkdir -p "${port_path}/subsystems"
   echo -n loop > "${port_path}/addr_trtype"
 
   local link_path="${port_path}/subsystems/${NQN}"
+  if [[ -L "${link_path}" ]]; then
+    if [[ "$(readlink "${link_path}")" != "/sys/kernel/config/nvmet/subsystems/${NQN}" ]]; then
+      rm -f "${link_path}"
+    fi
+  elif [[ -e "${link_path}" ]]; then
+    rm -rf "${link_path}"
+  fi
+
   if [[ ! -L "${link_path}" ]]; then
     ln -s "/sys/kernel/config/nvmet/subsystems/${NQN}" "${link_path}"
   fi
@@ -129,7 +181,9 @@ main() {
   need_cmd grep
   need_cmd cat
   need_cmd ln
+  need_cmd readlink
 
+  validate_inputs
   ensure_configfs_mounted
   load_modules
   create_backing_images
@@ -139,4 +193,6 @@ main() {
   print_summary
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
