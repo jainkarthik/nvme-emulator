@@ -9,6 +9,7 @@ BASE_DIR="${BASE_DIR:-/var/lib/nvme-emu}"
 IMAGE_PREFIX="${IMAGE_PREFIX:-nvme-drive}"
 NQN="${NQN:-nqn.2026-07.local.host:nvme-emu}"
 PORT_ID="${PORT_ID:-1}"
+UNIQUE_SERIALS="${UNIQUE_SERIALS:-1}"
 
 DESTROY_IMAGES="${DESTROY_IMAGES:-0}" # set to 1 to delete backing files
 
@@ -41,22 +42,73 @@ validate_inputs() {
     echo "ERROR: NQN must be non-empty and must not contain '/'" >&2
     exit 1
   fi
+
+  if [[ "${UNIQUE_SERIALS}" != "0" && "${UNIQUE_SERIALS}" != "1" ]]; then
+    echo "ERROR: UNIQUE_SERIALS must be 0 or 1" >&2
+    exit 1
+  fi
+}
+
+subsystem_nqn_for_drive() {
+  local i="$1"
+  if [[ "${UNIQUE_SERIALS}" == "1" ]]; then
+    echo "${NQN}:${i}"
+  else
+    echo "${NQN}"
+  fi
+}
+
+collect_target_nqns() {
+  local subsys_root="/sys/kernel/config/nvmet/subsystems"
+  local -A seen=()
+  local -a targets=()
+  local i candidate
+
+  for ((i=1; i<=NUM_DRIVES; i++)); do
+    candidate="$(subsystem_nqn_for_drive "${i}")"
+    if [[ -z "${seen["${candidate}"]+x}" ]]; then
+      seen["${candidate}"]=1
+      targets+=("${candidate}")
+    fi
+  done
+
+  if [[ -d "${subsys_root}/${NQN}" ]] && [[ -z "${seen["${NQN}"]+x}" ]]; then
+    seen["${NQN}"]=1
+    targets+=("${NQN}")
+  fi
+
+  shopt -s nullglob
+  for candidate in "${subsys_root}/${NQN}:"*; do
+    [[ -d "${candidate}" ]] || continue
+    candidate="${candidate##*/}"
+    if [[ -z "${seen["${candidate}"]+x}" ]]; then
+      seen["${candidate}"]=1
+      targets+=("${candidate}")
+    fi
+  done
+  shopt -u nullglob
+
+  printf "%s\n" "${targets[@]}"
 }
 
 disconnect_nvme_host() {
+  local target_nqn
   if command -v nvme >/dev/null 2>&1; then
-    nvme disconnect -n "${NQN}" >/dev/null 2>&1 || true
+    while IFS= read -r target_nqn; do
+      [[ -n "${target_nqn}" ]] || continue
+      nvme disconnect -n "${target_nqn}" >/dev/null 2>&1 || true
+    done < <(collect_target_nqns)
   fi
 }
 
-teardown_nvmet() {
-  local subsys_path="/sys/kernel/config/nvmet/subsystems/${NQN}"
+teardown_nvmet_nqn() {
+  local target_nqn="$1"
+  local subsys_path="/sys/kernel/config/nvmet/subsystems/${target_nqn}"
   local port_path="/sys/kernel/config/nvmet/ports/${PORT_ID}"
 
-  if [[ -L "${port_path}/subsystems/${NQN}" ]]; then
-    unlink "${port_path}/subsystems/${NQN}" 2>/dev/null || rm -f "${port_path}/subsystems/${NQN}"
+  if [[ -L "${port_path}/subsystems/${target_nqn}" ]]; then
+    unlink "${port_path}/subsystems/${target_nqn}" 2>/dev/null || rm -f "${port_path}/subsystems/${target_nqn}"
   fi
-  rmdir "${port_path}/subsystems" 2>/dev/null || true
 
   if [[ -d "${subsys_path}/namespaces" ]]; then
     local ns
@@ -72,6 +124,17 @@ teardown_nvmet() {
   fi
 
   rmdir "${subsys_path}" 2>/dev/null || true
+}
+
+teardown_nvmet() {
+  local target_nqn
+  while IFS= read -r target_nqn; do
+    [[ -n "${target_nqn}" ]] || continue
+    teardown_nvmet_nqn "${target_nqn}"
+  done < <(collect_target_nqns)
+
+  local port_path="/sys/kernel/config/nvmet/ports/${PORT_ID}"
+  rmdir "${port_path}/subsystems" 2>/dev/null || true
   rmdir "${port_path}" 2>/dev/null || true
 }
 
